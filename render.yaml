@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: taxisuper777-bot
+    env: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: ADMIN_IDS
+        sync: false
+      - key: NODE_ENV
+        value: production
+      - key: LOG_LEVEL
+        value: info
