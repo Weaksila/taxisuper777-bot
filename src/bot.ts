@@ -1,6 +1,4 @@
 import TelegramBot from "node-telegram-bot-api";
-import * as fs from "fs";
-import * as path from "path";
 import { logger } from "./lib/logger";
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN!;
@@ -218,8 +216,6 @@ const TEXTS: Record<string, Record<Lang, string>> = {
   routeAnalyticsTitle:{ uz: "📊 Yo'nalish analitikasi", ru: "📊 Аналитика маршрутов" },
   massApproveDone:{ uz: "✅ {count} ta haydovchi tasdiqlandi!", ru: "✅ Подтверждено {count} водителей!" },
   cleanupDone:    { uz: "🧹 {count} ta eski ma'lumot tozalandi.", ru: "🧹 Очищено {count} старых записей." },
-  cancelled:      { uz: "❌ Amal bekor qilindi.", ru: "❌ Действие отменено." },
-  btnAdminUsers:  { uz: "👥 Foydalanuvchilar", ru: "👥 Пользователи" },
   scheduledSet:   { uz: "✅ Xabar rejalashtirildi!", ru: "✅ Сообщение запланировано!" },
 };
 
@@ -316,6 +312,7 @@ interface Driver {
   totalRating: number;
   ratingCount: number;
   trips: Trip[];
+  // PRO fields
   schedule?: WeeklySchedule;
   earnings: EarningsEntry[];
   analytics: DriverAnalytics;
@@ -332,6 +329,7 @@ interface Passenger {
   seats: number;
   departureTime: string;
   location?: { latitude: number; longitude: number };
+  // PRO fields
   favorites: number[];
   savedAddresses: SavedAddress[];
   emergencyContact?: EmergencyContact;
@@ -355,6 +353,7 @@ interface Order {
   type: "passenger" | "parcel";
   parcelDesc?: string;
   scheduledDate?: string;
+  // PRO fields
   prefs?: PassengerPrefs;
   retryCount: number;
   expiresAt: Date;
@@ -421,104 +420,6 @@ const autoRetryEnabled: Record<number, boolean> = {};
 const scheduledBroadcasts: ScheduledBroadcast[] = [];
 const routeStats: Record<string, { orders: number; lastOrder: Date }> = {};
 
-const DATA_DIR = path.resolve(process.cwd(), ".bot-data");
-const DATA_FILE = path.join(DATA_DIR, "taxi-bot-state.json");
-let stateDirty = false;
-
-function reviveDate(value?: string | Date | null): Date | undefined {
-  if (!value) return undefined;
-  const date = value instanceof Date ? value : new Date(value);
-  return Number.isNaN(date.getTime()) ? undefined : date;
-}
-
-function markDirty() {
-  stateDirty = true;
-}
-
-function persistState(force = false) {
-  if (!force && !stateDirty) return;
-  try {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    const payload = {
-      userStates,
-      userLang,
-      drivers,
-      passengers,
-      orders,
-      complaints,
-      sosAlerts,
-      blacklist,
-      activeChats,
-      lastOrders,
-      allUsers: [...allUsers],
-      reminderEnabled,
-      referrals,
-      autoRetryEnabled,
-      scheduledBroadcasts,
-      routeStats,
-    };
-    const tmpFile = `${DATA_FILE}.tmp`;
-    fs.writeFileSync(tmpFile, JSON.stringify(payload, null, 2), "utf-8");
-    fs.renameSync(tmpFile, DATA_FILE);
-    stateDirty = false;
-  } catch (error) {
-    logger.error({ error }, "State persistence failed");
-  }
-}
-
-function loadState() {
-  if (!fs.existsSync(DATA_FILE)) return;
-  try {
-    const raw = JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
-    Object.assign(userStates, raw.userStates || {});
-    Object.assign(userLang, raw.userLang || {});
-    Object.entries(raw.drivers || {}).forEach(([id, d]: [string, any]) => {
-      drivers[Number(id)] = {
-        ...d,
-        lastSeen: reviveDate(d.lastSeen),
-        breakUntil: reviveDate(d.breakUntil),
-        earnings: d.earnings || [],
-        trips: d.trips || [],
-        analytics: d.analytics || {
-          routeCounts: {},
-          hourlyDistribution: {},
-          dailyEarnings: {},
-          categoryRatings: { punctuality: [], cleanliness: [], driving: [], behavior: [] },
-        },
-      };
-    });
-    Object.assign(passengers, raw.passengers || {});
-    Object.entries(raw.orders || {}).forEach(([id, order]: [string, any]) => {
-      orders[id] = {
-        ...order,
-        createdAt: reviveDate(order.createdAt) || new Date(),
-        expiresAt: reviveDate(order.expiresAt) || new Date(Date.now() + CONFIG.ORDER_EXPIRY_MINUTES * 60 * 1000),
-      };
-    });
-    (raw.complaints || []).forEach((item: any) => complaints.push({ ...item, createdAt: reviveDate(item.createdAt) || new Date() }));
-    (raw.sosAlerts || []).forEach((item: any) => sosAlerts.push({ ...item, createdAt: reviveDate(item.createdAt) || new Date() }));
-    Object.entries(raw.blacklist || {}).forEach(([id, item]: [string, any]) => {
-      blacklist[Number(id)] = { ...item, addedAt: reviveDate(item.addedAt) || new Date() };
-    });
-    Object.assign(activeChats, raw.activeChats || {});
-    Object.assign(lastOrders, raw.lastOrders || {});
-    (raw.allUsers || []).forEach((id: number | string) => allUsers.add(Number(id)));
-    Object.assign(reminderEnabled, raw.reminderEnabled || {});
-    Object.assign(referrals, raw.referrals || {});
-    Object.assign(autoRetryEnabled, raw.autoRetryEnabled || {});
-    (raw.scheduledBroadcasts || []).forEach((item: any) => scheduledBroadcasts.push({ ...item, scheduledAt: reviveDate(item.scheduledAt) || new Date() }));
-    Object.entries(raw.routeStats || {}).forEach(([route, item]: [string, any]) => {
-      routeStats[route] = {
-        orders: item.orders || 0,
-        lastOrder: reviveDate(item.lastOrder) || new Date(),
-      };
-    });
-    logger.info(`Loaded persisted bot state from ${DATA_FILE}`);
-  } catch (error) {
-    logger.error({ error }, "State loading failed");
-  }
-}
-
 // ═══════════════════════════════════════════════════════════════
 // VALIDATION
 // ═══════════════════════════════════════════════════════════════
@@ -526,23 +427,6 @@ function normalizePhone(p: string) { return p.replace(/[\s\-\(\)\+]/g, ""); }
 function validateCarNumber(n: string) { return /^\d{2}[A-Z]\d{3}[A-Z]{2}$/i.test(n.replace(/\s/g, "")); }
 function validateTime(t: string) { return /^([01]\d|2[0-3]):([0-5]\d)$/.test(t.trim()); }
 function validatePhone(p: string) { return /^(998)?\d{9}$/.test(normalizePhone(p)); }
-function normalizeStoredPhone(phone: string): string {
-  const normalized = normalizePhone(phone);
-  if (/^998\d{9}$/.test(normalized)) return normalized;
-  if (/^\d{9}$/.test(normalized)) return `998${normalized}`;
-  return normalized;
-}
-function getSavedPassengerProfile(chatId: number): { name: string; phone: string } | null {
-  const passenger = passengers[chatId];
-  if (passenger?.name?.trim() && validatePhone(passenger.phone || "")) {
-    return { name: passenger.name.trim(), phone: normalizeStoredPhone(passenger.phone) };
-  }
-  const last = lastOrders[chatId];
-  if (last?.name?.trim() && validatePhone(last.phone || "")) {
-    return { name: last.name.trim(), phone: normalizeStoredPhone(last.phone) };
-  }
-  return null;
-}
 function validateDriverTime(t: string): { ok: boolean; note?: string } {
   if (!validateTime(t)) return { ok: false, note: "To'g'ri format: 08:30" };
   const [h] = t.split(":").map(Number);
@@ -588,11 +472,13 @@ function validateCarModel(model: string): boolean {
 function autoVerifyDriver(data: Partial<Driver>, excludeId?: number): VerificationResult {
   const dupPhone = isDuplicatePhone(data.phone || "", excludeId);
   const dupCar   = isDuplicateCarNumber(data.carNumber || "", excludeId);
+  const timeCheck = validateDriverTime(data.departureTime || "");
   const checks = [
     { label: "Ism to'g'riligi",     ok: (data.name?.trim().split(/\s+/).length || 0) >= 1 && (data.name?.trim().length || 0) >= 3, note: "Ism kamida 3 harf bo'lsin" },
     { label: "Telefon raqam",       ok: validatePhone(data.phone || "") && !dupPhone,       note: dupPhone ? "Bu raqam allaqachon ro'yxatda" : "To'g'ri format: 998901234567" },
     { label: "Mashina modeli",      ok: validateCarModel(data.carModel || ""),              note: "Noto'g'ri model (masalan: Cobalt, Nexia, Lacetti)" },
     { label: "Mashina raqami",      ok: validateCarNumber(data.carNumber || "") && !dupCar, note: dupCar ? "Bu raqam allaqachon ro'yxatda" : "Format: 01A123BC" },
+    { label: "Jo'nash vaqti",       ok: timeCheck.ok,                                       note: timeCheck.note },
     { label: "Narx diapazoni",      ok: (data.price || 0) >= 5000 && (data.price || 0) <= 5000000, note: "5,000–5,000,000 so'm" },
   ].map((c) => ({ ...c, note: c.ok ? undefined : c.note }));
   const score = checks.filter((c) => c.ok).length;
@@ -600,7 +486,7 @@ function autoVerifyDriver(data: Partial<Driver>, excludeId?: number): Verificati
 }
 
 function formatVerificationCard(v: VerificationResult): string {
-  const badge = v.passed ? "🟢 TASDIQLANDI" : v.score >= 4 ? "🟡 DEYARLI" : v.score >= 2 ? "🟠 QISMAN" : "🔴 XATOLIKLAR";
+  const badge = v.passed ? "🟢 TASDIQLANDI" : v.score >= 5 ? "🟡 DEYARLI" : v.score >= 3 ? "🟠 QISMAN" : "🔴 XATOLIKLAR";
   const lines = v.checks.map((c) => `${c.ok ? "✅" : "❌"} ${c.label}${c.note ? ` — <i>${c.note}</i>` : ""}`);
   return `🔍 <b>Avto tekshruv:</b> ${badge} (${v.score}/${v.checks.length})\n${lines.join("\n")}`;
 }
@@ -709,13 +595,6 @@ function initDriverDefaults(chatId: number): void {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// SAFE CALLBACK ANSWER (fixes duplicate answer issues)
-// ═══════════════════════════════════════════════════════════════
-async function answerCb(queryId: string, options?: TelegramBot.AnswerCallbackQueryOptions) {
-  try { await bot.answerCallbackQuery(queryId, options); } catch (_) {}
-}
-
-// ═══════════════════════════════════════════════════════════════
 // REMINDERS
 // ═══════════════════════════════════════════════════════════════
 function scheduleReminder(orderId: string, passengerChatId: number, timeStr: string) {
@@ -755,16 +634,15 @@ function mainMenuKeyboard(chatId: number) {
   }
   if (drivers[chatId]?.approved) {
     rows.push([{ text: TEXTS.btnMyStats[lang] }, { text: TEXTS.btnEdit[lang] }]);
+    // PRO: driver extra buttons
     rows.push([{ text: TEXTS.btnSchedule[lang] }, { text: TEXTS.btnEarnings[lang] }]);
     rows.push([{ text: TEXTS.btnAnalytics[lang] }, { text: TEXTS.btnBreak[lang] }]);
     rows.push([{ text: TEXTS.btnLeaderboard[lang] }]);
   }
+  // PRO: passenger extra buttons
   if (!drivers[chatId]) {
     rows.push([{ text: TEXTS.btnFavorites[lang] }, { text: TEXTS.btnSavedPlaces[lang] }]);
     rows.push([{ text: TEXTS.btnBookForOther[lang] }, { text: TEXTS.btnEmergency[lang] }]);
-    rows.push([{ text: TEXTS.btnQuickMsgs[lang] }, { text: TEXTS.btnOrderNotes[lang] }]);
-    const autoRetryBtn = (autoRetryEnabled[chatId] !== false) ? "🔄 Avto-qidiruv: Yoq" : "🔄 Avto-qidiruv: O'chiq";
-    rows.push([{ text: autoRetryBtn }]);
   }
   if (driver && driver.approved && !driver.blocked) {
     const statusBtn = driver.online ? TEXTS.btnOffline[lang] : TEXTS.btnOnline[lang];
@@ -818,20 +696,6 @@ async function sendToAdmins(message: string, options: TelegramBot.SendMessageOpt
   }
 }
 
-async function sendChunkedHtml(chatId: number, title: string, lines: string[]) {
-  const limit = 3500;
-  let buffer = title;
-  for (const line of lines) {
-    if ((buffer + "\n" + line).length > limit) {
-      await bot.sendMessage(chatId, buffer, { parse_mode: "HTML" });
-      buffer = title + "\n" + line;
-    } else {
-      buffer += `\n${line}`;
-    }
-  }
-  if (buffer.trim()) await bot.sendMessage(chatId, buffer, { parse_mode: "HTML" });
-}
-
 // ═══════════════════════════════════════════════════════════════
 // NOTIFY DRIVERS (ENHANCED WITH PRO FEATURES)
 // ═══════════════════════════════════════════════════════════════
@@ -841,9 +705,9 @@ async function notifyDrivers(order: Order) {
   );
   if (matched.length === 0) {
     await bot.sendMessage(order.passenger.chatId, t(order.passenger.chatId, "noDrivers"));
+    // PRO: auto-retry
     if (CONFIG.AUTO_RETRY_ENABLED && autoRetryEnabled[order.passenger.chatId] !== false && order.retryCount < CONFIG.MAX_AUTO_RETRIES) {
       order.retryCount++;
-      markDirty();
       setTimeout(() => {
         if (orders[order.id]?.status === "pending") {
           notifyDrivers(order);
@@ -853,6 +717,7 @@ async function notifyDrivers(order: Order) {
     return;
   }
   const isParcel = order.type === "parcel";
+  // PRO: sort by rating and proximity logic (rating first)
   matched.sort((a, b) => {
     const avgA = a.ratingCount > 0 ? a.totalRating / a.ratingCount : 0;
     const avgB = b.ratingCount > 0 ? b.totalRating / b.ratingCount : 0;
@@ -888,95 +753,36 @@ async function notifyDrivers(order: Order) {
 function cleanupOldOrders() {
   const now = new Date();
   let cleaned = 0;
-  let changed = false;
   Object.entries(orders).forEach(([id, order]) => {
     const ageHours = (now.getTime() - order.createdAt.getTime()) / (1000 * 60 * 60);
     if (ageHours > CONFIG.MAX_ORDER_AGE_HOURS && (order.status === "completed" || order.status === "rejected" || order.status === "expired")) {
       delete orders[id];
       cleaned++;
-      changed = true;
     }
+    // PRO: expire pending orders
     if (order.status === "pending" && now > order.expiresAt) {
       order.status = "expired";
-      changed = true;
       try {
         bot.sendMessage(order.passenger.chatId, t(order.passenger.chatId, "orderExpired"));
       } catch (_) {}
       cleaned++;
     }
   });
+  // Reset daily driver counters
   const today = getTodayStr();
   Object.values(drivers).forEach((d) => {
     if (d.lastOrderDate !== today) {
       d.dailyOrders = 0;
       d.lastOrderDate = today;
-      changed = true;
     }
   });
-  if (changed) markDirty();
   return cleaned;
 }
 
-function restoreRuntimeState() {
-  Object.keys(drivers).forEach((id) => {
-    const chatId = Number(id);
-    initDriverDefaults(chatId);
-    const driver = drivers[chatId];
-    if (driver?.breakUntil) {
-      const diff = driver.breakUntil.getTime() - Date.now();
-      if (diff <= 0) {
-        driver.breakUntil = undefined;
-        driver.online = true;
-        markDirty();
-      } else {
-        setTimeout(() => {
-          const current = drivers[chatId];
-          if (current?.breakUntil && current.breakUntil.getTime() <= Date.now()) {
-            current.breakUntil = undefined;
-            current.online = true;
-            markDirty();
-            bot.sendMessage(chatId, t(chatId, "breakDone")).catch(() => {});
-          }
-        }, diff);
-      }
-    }
-  });
-  Object.values(orders).forEach((order) => {
-    if ((order.status === "pending" || order.status === "accepted") && order.passenger?.chatId) {
-      scheduleReminder(order.id, order.passenger.chatId, order.passenger.departureTime);
-    }
-  });
-  cleanupOldOrders();
-}
-
-loadState();
-restoreRuntimeState();
-setInterval(() => persistState(), 5000);
-process.once("SIGINT", () => { persistState(true); process.exit(0); });
-process.once("SIGTERM", () => { persistState(true); process.exit(0); });
-process.once("beforeExit", () => persistState(true));
-
 setInterval(() => {
   const cleaned = cleanupOldOrders();
-  if (cleaned > 0) {
-    logger.info(`Cleaned up ${cleaned} old/expired orders`);
-    persistState();
-  }
+  if (cleaned > 0) logger.info(`Cleaned up ${cleaned} old/expired orders`);
 }, CONFIG.CLEANUP_INTERVAL_MS);
-
-// Scheduled broadcast checker
-setInterval(() => {
-  const now = new Date();
-  scheduledBroadcasts.forEach((sb) => {
-    if (!sb.sent && sb.scheduledAt <= now) {
-      sb.sent = true;
-      markDirty();
-      for (const uid of allUsers) {
-        bot.sendMessage(uid, `📢 <b>Rejalashtirilgan xabar:</b>\n\n${sb.message}`, { parse_mode: "HTML" }).catch(() => {});
-      }
-    }
-  });
-}, 60_000);
 
 // ═══════════════════════════════════════════════════════════════
 // /start
@@ -984,7 +790,6 @@ setInterval(() => {
 bot.onText(/\/start(.*)/, async (msg, match) => {
   const chatId = msg.chat.id;
   const param = (match?.[1] || "").trim();
-  markDirty();
 
   if (param.startsWith("ref_")) {
     const inviterId = parseInt(param.replace("ref_", ""));
@@ -1002,12 +807,6 @@ bot.onText(/\/start(.*)/, async (msg, match) => {
         } catch (_) {}
       }
     }
-  }
-
-  if (userLang[chatId]) {
-    userStates[chatId] = { step: "main", data: {} };
-    await bot.sendMessage(chatId, `${TEXTS.welcome[userLang[chatId]]}!`, mainMenuKeyboard(chatId));
-    return;
   }
 
   userStates[chatId] = { step: "choose_lang", data: {} };
@@ -1030,7 +829,6 @@ bot.on("message", async (msg) => {
   const contact = msg.contact;
 
   allUsers.add(chatId);
-  markDirty();
 
   if (blacklist[chatId]) {
     await bot.sendMessage(chatId, t(chatId, "blacklisted"));
@@ -1148,29 +946,12 @@ bot.on("message", async (msg) => {
   // ═════════════════════════════════════════════════════════════
 
   if (text === t(chatId, "btnDriver")) {
-    const existingDriver = drivers[chatId];
-    if (existingDriver) {
-      const status = existingDriver.blocked ? "🚫 Заблокирован" : existingDriver.approved ? "✅ Автоподтверждён" : "⏳ На проверке";
-      const verification = existingDriver.verification ? `\n\n${formatVerificationCard(existingDriver.verification)}` : "";
-      await bot.sendMessage(
-        chatId,
-        `🚗 <b>Ваш профиль водителя уже сохранён</b>\n\n👤 ${existingDriver.name}\n📞 ${existingDriver.phone}\n🚗 ${existingDriver.carModel} (${existingDriver.carNumber})\n📍 ${existingDriver.route}\n🕐 ${existingDriver.departureTime}\n💰 ${existingDriver.price.toLocaleString()} so'm\n📌 Статус: ${status}${verification}\n\nДля изменения используйте кнопку редактирования.`,
-        { parse_mode: "HTML", ...mainMenuKeyboard(chatId) }
-      );
-      return;
-    }
     userStates[chatId] = { step: "driver_name", data: {} };
     await bot.sendMessage(chatId, t(chatId, "enterName"), cancelKeyboard(chatId));
     return;
   }
 
   if (text === t(chatId, "btnPassenger")) {
-    const savedProfile = getSavedPassengerProfile(chatId);
-    if (savedProfile) {
-      userStates[chatId] = { step: "passenger_route", data: { ...savedProfile } };
-      await bot.sendMessage(chatId, `✅ Сохранённые данные загружены:\n👤 ${savedProfile.name}\n📞 ${savedProfile.phone}\n\n${t(chatId, "chooseRoute")}`, routeKeyboard(chatId));
-      return;
-    }
     userStates[chatId] = { step: "passenger_name", data: {} };
     await bot.sendMessage(chatId, t(chatId, "enterName"), cancelKeyboard(chatId));
     return;
@@ -1194,12 +975,6 @@ bot.on("message", async (msg) => {
   }
 
   if (text === t(chatId, "btnParcel")) {
-    const savedProfile = getSavedPassengerProfile(chatId);
-    if (savedProfile) {
-      userStates[chatId] = { step: "parcel_route", data: { ...savedProfile } };
-      await bot.sendMessage(chatId, `✅ Сохранённые данные загружены.\n\n${t(chatId, "parcelRoute")}`, routeKeyboard(chatId));
-      return;
-    }
     userStates[chatId] = { step: "parcel_name", data: {} };
     await bot.sendMessage(chatId, t(chatId, "enterName"), cancelKeyboard(chatId));
     return;
@@ -1239,11 +1014,10 @@ bot.on("message", async (msg) => {
     const statusIcon = driver.online ? "🟢 ONLINE" : "🔴 OFFLINE";
     const lastSeenText = driver.lastSeen ? `\n🕐 Oxirgi faollik: ${driver.lastSeen.toLocaleString("uz-UZ")}` : "";
     const breakText = driver.breakUntil && driver.breakUntil > new Date() ? `\n⏸️ Tanaffus: ${driver.breakUntil.toLocaleTimeString("uz-UZ")} gacha` : "";
-    let txt = `📡 <b>Mening holatim</b>\n\n${statusIcon}${breakText}\n🚗 ${driver.carModel} (${driver.carNumber})\n📍 ${driver.route}\n🕐 ${driver.departureTime}\n💰 ${driver.price.toLocaleString()} so'm\n${formatRating(driver)}\n💺 ${driver.seats} o'rindiq${lastSeenText}`;
-    const kb = (driver.breakUntil && driver.breakUntil > new Date())
-      ? { inline_keyboard: [[{ text: "▶️ Tanaffusni tugatish", callback_data: "break_stop" }]] }
-      : undefined;
-    await bot.sendMessage(chatId, txt, { parse_mode: "HTML", ...(kb ? { reply_markup: kb } : {}), ...mainMenuKeyboard(chatId) });
+    await bot.sendMessage(chatId,
+      `📡 <b>Mening holatim</b>\n\n${statusIcon}${breakText}\n🚗 ${driver.carModel} (${driver.carNumber})\n📍 ${driver.route}\n🕐 ${driver.departureTime}\n💰 ${driver.price.toLocaleString()} so'm\n${formatRating(driver)}\n💺 ${driver.seats} o'rindiq${lastSeenText}`,
+      { parse_mode: "HTML", ...mainMenuKeyboard(chatId) }
+    );
     return;
   }
 
@@ -1279,16 +1053,6 @@ bot.on("message", async (msg) => {
     const tomorrow = new Date();
     tomorrow.setDate(tomorrow.getDate() + 1);
     const dateStr = tomorrow.toLocaleDateString("uz-UZ", { day: "2-digit", month: "2-digit", year: "numeric" });
-    const savedProfile = getSavedPassengerProfile(chatId);
-    if (savedProfile) {
-      userStates[chatId] = { step: "tmrw_route", data: { scheduledDate: dateStr, ...savedProfile } };
-      await bot.sendMessage(
-        chatId,
-        `${TEXTS.tomorrowInfo[lang]}\n\n📅 Sana: <b>${dateStr}</b>\n\n✅ Сохранённые данные загружены.\n${t(chatId, "chooseRoute")}`,
-        { parse_mode: "HTML", ...routeKeyboard(chatId) }
-      );
-      return;
-    }
     await bot.sendMessage(
       chatId,
       `${TEXTS.tomorrowInfo[lang]}\n\n📅 Sana: <b>${dateStr}</b>\n\nIsmingizni kiriting:`,
@@ -1363,14 +1127,6 @@ bot.on("message", async (msg) => {
   if (text === "🔔 Eslatma: Yoq" || text === "🔕 Eslatma: O'chiq") {
     reminderEnabled[chatId] = (text === "🔕 Eslatma: O'chiq");
     const msg = reminderEnabled[chatId] ? t(chatId, "reminderOnMsg") : t(chatId, "reminderOffMsg");
-    await bot.sendMessage(chatId, msg, mainMenuKeyboard(chatId));
-    return;
-  }
-
-  // Auto-retry toggle
-  if (text === "🔄 Avto-qidiruv: Yoq" || text === "🔄 Avto-qidiruv: O'chiq") {
-    autoRetryEnabled[chatId] = (text === "🔄 Avto-qidiruv: O'chiq");
-    const msg = autoRetryEnabled[chatId] ? t(chatId, "autoRetryOn") : t(chatId, "autoRetryOff");
     await bot.sendMessage(chatId, msg, mainMenuKeyboard(chatId));
     return;
   }
@@ -1484,9 +1240,7 @@ bot.on("message", async (msg) => {
     const lang = userLang[chatId] || "uz";
     const btns = CONFIG.BREAK_DURATIONS.map((m) => [{ text: `${m} daqiqa`, callback_data: `break_${m}` }]);
     await bot.sendMessage(chatId, TEXTS.breakPrompt[lang], {
-      reply_markup: {
-        inline_keyboard: btns.concat([[{ text: TEXTS.btnCancel[lang], callback_data: "break_cancel" }]]),
-      },
+      reply_markup: { keyboard: btns.concat([[{ text: TEXTS.btnCancel[lang] }]]), resize_keyboard: true },
     });
     return;
   }
@@ -1531,7 +1285,6 @@ bot.on("message", async (msg) => {
       if (d) {
         txt += `${i + 1}. 👤 <b>${d.name}</b>\n   🚗 ${d.carModel} | 📞 ${d.phone}\n   📍 ${d.route} | ${formatRating(d)}\n\n`;
         kb.push([{ text: `🚕 ${d.name} ga buyurtma`, callback_data: `fav_order_${fid}` }]);
-        kb.push([{ text: `❌ ${d.name} ni o'chirish`, callback_data: `fav_del_${fid}` }]);
       }
     });
     await bot.sendMessage(chatId, txt, { parse_mode: "HTML", reply_markup: { inline_keyboard: kb } });
@@ -1544,21 +1297,15 @@ bot.on("message", async (msg) => {
     const places = passenger?.savedAddresses || [];
     const lang = userLang[chatId] || "uz";
     if (places.length === 0) {
-      await bot.sendMessage(chatId, TEXTS.noSavedPlaces[lang], {
-        reply_markup: { inline_keyboard: [[{ text: "➕ Yangi manzil qo'shish", callback_data: "add_place" }]] },
-      });
+      await bot.sendMessage(chatId, TEXTS.noSavedPlaces[lang], mainMenuKeyboard(chatId));
       return;
     }
     let txt = TEXTS.savedPlacesTitle[lang] + "\n\n";
-    const kb: { text: string; callback_data: string }[][] = [
-      [{ text: "➕ Yangi qo'shish", callback_data: "add_place" }],
-    ];
     places.forEach((p, i) => {
       const icon = p.type === "home" ? "🏠" : p.type === "work" ? "🏢" : "📍";
       txt += `${i + 1}. ${icon} <b>${p.name}</b>\n   ${p.address}\n\n`;
-      kb.push([{ text: `🗑 ${icon} ${p.name}`, callback_data: `del_place_${i}` }]);
     });
-    await bot.sendMessage(chatId, txt, { parse_mode: "HTML", reply_markup: { inline_keyboard: kb } });
+    await bot.sendMessage(chatId, txt, { parse_mode: "HTML", ...mainMenuKeyboard(chatId) });
     return;
   }
 
@@ -1577,21 +1324,9 @@ bot.on("message", async (msg) => {
   }
 
   if (state.step === "book_other_phone") {
-    if (!validatePhone(text)) {
-      await bot.sendMessage(chatId, "❌ To'g'ri telefon kiriting: 998901234567", cancelKeyboard(chatId));
-      return;
-    }
-    state.data.otherPhone = normalizeStoredPhone(text);
-    state.data.isBookedForOther = true;
-    const savedProfile = getSavedPassengerProfile(chatId);
-    if (savedProfile) {
-      state.data.name = savedProfile.name;
-      state.data.phone = savedProfile.phone;
-      state.step = "passenger_route";
-      await bot.sendMessage(chatId, `✅ Buyurtmachi ma'lumotlari yuklandi.\n\n${t(chatId, "chooseRoute")}`, routeKeyboard(chatId));
-      return;
-    }
+    state.data.otherPhone = text;
     state.step = "passenger_name";
+    state.data.isBookedForOther = true;
     await bot.sendMessage(chatId, "Endi sizning ma'lumotlaringiz (buyurtmachi):\n" + t(chatId, "enterName"), cancelKeyboard(chatId));
     return;
   }
@@ -1611,73 +1346,10 @@ bot.on("message", async (msg) => {
   }
 
   if (state.step === "emergency_phone") {
-    if (!validatePhone(text)) {
-      await bot.sendMessage(chatId, "❌ To'g'ri telefon kiriting: 998901234567", cancelKeyboard(chatId));
-      return;
-    }
     if (!passengers[chatId]) passengers[chatId] = { chatId, name: msg.from?.first_name || "", phone: "", route: "", seats: 0, departureTime: "", favorites: [], savedAddresses: [] };
-    passengers[chatId].emergencyContact = { name: state.data.emergencyName, phone: normalizeStoredPhone(text) };
+    passengers[chatId].emergencyContact = { name: state.data.emergencyName, phone: text };
     userStates[chatId] = { step: "main", data: {} };
     await bot.sendMessage(chatId, t(chatId, "emergencySet"), mainMenuKeyboard(chatId));
-    return;
-  }
-
-  // 💬 Tez xabarlar
-  if (text === t(chatId, "btnQuickMsgs")) {
-    const lang = userLang[chatId] || "uz";
-    const msgs = lang === "uz"
-      ? ["📍 Manzilga yetib keldim", "⏳ 5 daqiqa kutaman", "🚪 Eshik oldidaman", "❌ Bekor qildim"]
-      : ["📍 Я на месте", "⏳ Жду 5 минут", "🚪 У подъезда", "❌ Отменил"];
-    await bot.sendMessage(chatId, TEXTS.quickMsgTitle[lang], {
-      reply_markup: { inline_keyboard: msgs.map((m) => [{ text: m, callback_data: `quickmsg_${m}` }]) },
-    });
-    return;
-  }
-
-  // 📝 Buyurtma izohi
-  if (text === t(chatId, "btnOrderNotes")) {
-    userStates[chatId] = { step: "set_default_notes", data: {} };
-    await bot.sendMessage(chatId, t(chatId, "orderNotesPrompt"), cancelKeyboard(chatId));
-    return;
-  }
-
-  if (state.step === "set_default_notes") {
-    if (!passengers[chatId]) passengers[chatId] = { chatId, name: msg.from?.first_name || "", phone: "", route: "", seats: 0, departureTime: "", favorites: [], savedAddresses: [] };
-    passengers[chatId].prefs = { ...(passengers[chatId].prefs || {}), notes: text };
-    userStates[chatId] = { step: "main", data: {} };
-    await bot.sendMessage(chatId, "✅ Izoh saqlandi! Keyingi buyurtmalaringizda avtomatik qo'shiladi.", mainMenuKeyboard(chatId));
-    return;
-  }
-
-  // Saqlangan manzil qo'shish flow
-  if (state.step === "place_name") {
-    state.data.placeName = text;
-    state.step = "place_address";
-    await bot.sendMessage(chatId, "Manzilni kiriting (masalan: Toshkent, Chilonzor 5):", cancelKeyboard(chatId));
-    return;
-  }
-  if (state.step === "place_address") {
-    state.data.placeAddress = text;
-    state.step = "place_type";
-    await bot.sendMessage(chatId, "Turini tanlang:", {
-      reply_markup: {
-        keyboard: [[{ text: "🏠 Uy" }, { text: "🏢 Ish" }, { text: "📍 Boshqa" }], [{ text: t(chatId, "btnCancel") }]],
-        resize_keyboard: true,
-      },
-    });
-    return;
-  }
-  if (state.step === "place_type") {
-    const typeMap: Record<string, "home" | "work" | "other"> = { "🏠 Uy": "home", "🏢 Ish": "work", "📍 Boshqa": "other" };
-    const pType = typeMap[text] || "other";
-    if (!passengers[chatId]) passengers[chatId] = { chatId, name: msg.from?.first_name || "", phone: "", route: "", seats: 0, departureTime: "", favorites: [], savedAddresses: [] };
-    passengers[chatId].savedAddresses.push({
-      name: state.data.placeName,
-      address: state.data.placeAddress,
-      type: pType,
-    });
-    userStates[chatId] = { step: "main", data: {} };
-    await bot.sendMessage(chatId, TEXTS.addressAdded.uz, mainMenuKeyboard(chatId));
     return;
   }
 
@@ -1793,7 +1465,6 @@ bot.on("message", async (msg) => {
         reply_markup: {
           inline_keyboard: [
             [{ text: "👨‍✈️ Haydovchilar", callback_data: "admin_drivers" }],
-            [{ text: TEXTS.btnAdminUsers.uz, callback_data: "admin_users" }],
             [{ text: "📋 Buyurtmalar",   callback_data: "admin_orders" }],
             [{ text: "🚫 Shikoyatlar",   callback_data: "admin_complaints" }],
             [{ text: "💬 Foydalanuvchiga javob", callback_data: "admin_reply" }],
@@ -1802,7 +1473,7 @@ bot.on("message", async (msg) => {
             [{ text: `📊 Statistika`, callback_data: "admin_stats" }, { text: `📤 Eksport`, callback_data: "admin_export" }],
             [{ text: `📅 Ertangi bronlar`, callback_data: "admin_tomorrow" }],
             [{ text: `📢 Hammaga xabar`, callback_data: "admin_broadcast" }],
-            [{ text: TEXTS.btnScheduledBroadcast.uz, callback_data: "admin_scheduled_broadcast" }],
+            // PRO admin buttons
             [{ text: TEXTS.btnRouteAnalytics.uz, callback_data: "admin_route_analytics" }],
             [{ text: TEXTS.btnLeaderboardAdmin.uz, callback_data: "admin_leaderboard" }],
             [{ text: TEXTS.btnMassApprove.uz, callback_data: "admin_mass_approve" }],
@@ -1831,7 +1502,7 @@ bot.on("message", async (msg) => {
   }
 
   // ═════════════════════════════════════════════════════════════
-  // DRIVER REGISTRATION (REMOVED TIME & SEATS FROM FLOW)
+  // DRIVER REGISTRATION
   // ═════════════════════════════════════════════════════════════
   if (state.step === "driver_name") {
     state.data.name = text; state.step = "driver_phone";
@@ -1839,7 +1510,7 @@ bot.on("message", async (msg) => {
     return;
   }
   if (state.step === "driver_phone") {
-    const phone = normalizeStoredPhone(contact ? contact.phone_number : text);
+    const phone = contact ? contact.phone_number : text;
     if (!validatePhone(phone)) {
       await bot.sendMessage(chatId, "❌ Noto'g'ri telefon raqam. Masalan: 998901234567 yoki +998901234567\nQayta kiriting:", sharePhoneKeyboard(chatId));
       return;
@@ -1881,7 +1552,27 @@ bot.on("message", async (msg) => {
   }
   if (state.step === "driver_route") {
     if (!ROUTES.includes(text)) { await bot.sendMessage(chatId, t(chatId, "chooseRoute"), routeKeyboard(chatId)); return; }
-    state.data.route = text; state.step = "driver_price";
+    state.data.route = text; state.step = "driver_seats";
+    await bot.sendMessage(chatId, t(chatId, "enterSeats"), cancelKeyboard(chatId));
+    return;
+  }
+  if (state.step === "driver_seats") {
+    const n = parseInt(text);
+    if (isNaN(n) || n < 1 || n > 6) {
+      await bot.sendMessage(chatId, "❌ 1 dan 6 gacha son kiriting:", cancelKeyboard(chatId));
+      return;
+    }
+    state.data.seats = n; state.step = "driver_time";
+    await bot.sendMessage(chatId, `${t(chatId, "enterTime")}\n<i>04:00–22:00 oralig'ida bo'lishi kerak</i>`, { parse_mode: "HTML", ...cancelKeyboard(chatId) });
+    return;
+  }
+  if (state.step === "driver_time") {
+    const timeCheck = validateDriverTime(text.trim());
+    if (!timeCheck.ok) {
+      await bot.sendMessage(chatId, `❌ ${timeCheck.note}\n\nQayta kiriting (masalan: 08:30):`, cancelKeyboard(chatId));
+      return;
+    }
+    state.data.departureTime = text.trim(); state.step = "driver_price";
     await bot.sendMessage(chatId, `${t(chatId, "enterPrice")}\n<i>5,000 – 5,000,000 so'm oralig'ida</i>`, { parse_mode: "HTML", ...cancelKeyboard(chatId) });
     return;
   }
@@ -1892,10 +1583,6 @@ bot.on("message", async (msg) => {
       return;
     }
     state.data.price = price;
-    // Default values for removed fields
-    state.data.departureTime = "08:00";
-    state.data.seats = 4;
-
     const verification = autoVerifyDriver(state.data as Partial<Driver>, chatId);
     const isReRegistration = !!drivers[chatId];
     const prevTrips   = drivers[chatId]?.trips || [];
@@ -1911,7 +1598,7 @@ bot.on("message", async (msg) => {
       carNumber: state.data.carNumber, carModel: state.data.carModel,
       route: state.data.route, seats: state.data.seats,
       departureTime: state.data.departureTime, price,
-      approved: verification.passed,
+      approved: verification.passed && ADMIN_IDS.length === 0,
       blocked: false, online: false, verification,
       totalRating: prevRating, ratingCount: prevCount, trips: prevTrips,
       earnings: prevEarnings, analytics: prevAnalytics,
@@ -1922,17 +1609,19 @@ bot.on("message", async (msg) => {
     const card = formatVerificationCard(verification);
     let suffix: string;
     if (verification.passed) {
-      suffix = `\n\n🎉 ${isReRegistration ? "Ma'lumotlar yangilandi" : "Ro'yxatdan o'tdingiz"}! Profil avtomatik tasdiqlandi va buyurtmalar olishingiz mumkin 🚗`;
+      suffix = ADMIN_IDS.length > 0
+        ? `\n\n${t(chatId, "adminPending")}`
+        : `\n\n🎉 ${isReRegistration ? "Ma'lumotlar yangilandi" : "Ro'yxatdan o'tdingiz"}! Buyurtmalar kutilmoqda 🚗`;
     } else {
       const failed = verification.checks.filter((c) => !c.ok).map((c) => `• ${c.label}: ${c.note}`).join("\n");
       suffix = `\n\n⚠️ Quyidagi xatoliklarni tuzating:\n${failed}\n\nQayta ro'yxatdan o'tish uchun 🚗 Haydovchi tugmasini bosing.`;
     }
     await bot.sendMessage(chatId, `${card}${suffix}`, { parse_mode: "HTML", ...mainMenuKeyboard(chatId) });
     await sendToAdmins(
-      `${isReRegistration ? "🔄" : "🆕"} <b>${isReRegistration ? "Qayta ro'yxat" : "Yangi haydovchi"}</b> (${verification.passed ? "✅ AUTO " + verification.score + "/5" : `❌ ${verification.score}/5`})\n` +
+      `${isReRegistration ? "🔄" : "🆕"} <b>${isReRegistration ? "Qayta ro'yxat" : "Yangi haydovchi"}</b> (${verification.passed ? "✅ " + verification.score + "/6" : `❌ ${verification.score}/6`})\n` +
       `👤 ${driver.name} | 📞 ${driver.phone}\n` +
       `🚗 ${driver.carModel} (${driver.carNumber})\n` +
-      `📍 ${driver.route} | 🕐 ${driver.departureTime} | 💺 ${driver.seats}\n` +
+      `📍 ${driver.route} | 🕐 ${driver.departureTime}\n` +
       `💰 ${price.toLocaleString()} so'm | ID: ${chatId}`
     );
     return;
@@ -1947,7 +1636,7 @@ bot.on("message", async (msg) => {
     return;
   }
   if (state.step === "tmrw_phone") {
-    const phone = normalizeStoredPhone(contact ? contact.phone_number : text);
+    const phone = contact ? contact.phone_number : text;
     if (!validatePhone(phone)) {
       await bot.sendMessage(chatId, "❌ Noto'g'ri telefon. Qayta kiriting:", sharePhoneKeyboard(chatId));
       return;
@@ -1976,12 +1665,6 @@ bot.on("message", async (msg) => {
     }
     const d = state.data;
     const orderId = `tmrw_${chatId}_${Date.now()}`;
-    // Save passenger profile
-    if (!passengers[chatId]) passengers[chatId] = { chatId, name: d.name, phone: d.phone, route: d.route, seats: d.seats, departureTime: text.trim(), favorites: [], savedAddresses: [] };
-    else {
-      passengers[chatId].name = d.name;
-      passengers[chatId].phone = d.phone;
-    }
     const passenger: Passenger = {
       chatId, name: d.name, phone: d.phone,
       route: d.route, seats: d.seats, departureTime: text.trim(),
@@ -2016,7 +1699,7 @@ bot.on("message", async (msg) => {
     return;
   }
   if (state.step === "ann_order_phone") {
-    const phone = normalizeStoredPhone(contact ? contact.phone_number : text);
+    const phone = contact ? contact.phone_number : text;
     if (!validatePhone(phone)) {
       await bot.sendMessage(chatId, "❌ Noto'g'ri telefon. Qayta kiriting:", sharePhoneKeyboard(chatId));
       return;
@@ -2048,12 +1731,6 @@ bot.on("message", async (msg) => {
       return;
     }
     const orderId = `ann_${chatId}_${Date.now()}`;
-    // Save passenger profile
-    if (!passengers[chatId]) passengers[chatId] = { chatId, name: d.name, phone: d.phone, route: d.route, seats: d.seats, departureTime: text.trim(), favorites: [], savedAddresses: [] };
-    else {
-      passengers[chatId].name = d.name;
-      passengers[chatId].phone = d.phone;
-    }
     const passenger: Passenger = {
       chatId, name: d.name, phone: d.phone,
       route: d.route, seats: d.seats, departureTime: text.trim(),
@@ -2089,7 +1766,7 @@ bot.on("message", async (msg) => {
   }
 
   // ═════════════════════════════════════════════════════════════
-  // PASSENGER REGISTRATION (ENHANCED WITH PROFILE SAVING)
+  // PASSENGER REGISTRATION (ENHANCED WITH PRO)
   // ═════════════════════════════════════════════════════════════
   if (state.step === "passenger_name") {
     state.data.name = text; state.step = "passenger_phone";
@@ -2097,18 +1774,7 @@ bot.on("message", async (msg) => {
     return;
   }
   if (state.step === "passenger_phone") {
-    const phone = normalizeStoredPhone(contact ? contact.phone_number : text);
-    if (!validatePhone(phone)) {
-      await bot.sendMessage(chatId, "❌ To'g'ri telefon kiriting: 998901234567", sharePhoneKeyboard(chatId));
-      return;
-    }
-    state.data.phone = phone;
-    // Save profile immediately
-    if (!passengers[chatId]) passengers[chatId] = { chatId, name: state.data.name, phone, route: "", seats: 0, departureTime: "", favorites: [], savedAddresses: [] };
-    else {
-      passengers[chatId].name = state.data.name;
-      passengers[chatId].phone = phone;
-    }
+    state.data.phone = contact ? contact.phone_number : text;
     state.step = "passenger_route";
     await bot.sendMessage(chatId, t(chatId, "chooseRoute"), routeKeyboard(chatId));
     return;
@@ -2176,7 +1842,6 @@ bot.on("message", async (msg) => {
     const existingFavs = passengers[chatId]?.favorites || [];
     const existingAddrs = passengers[chatId]?.savedAddresses || [];
     const existingEmerg = passengers[chatId]?.emergencyContact;
-    const existingPrefs = passengers[chatId]?.prefs;
     const passenger: Passenger = {
       chatId, name: state.data.name, phone: state.data.phone,
       route: state.data.route, seats: state.data.seats,
@@ -2185,7 +1850,7 @@ bot.on("message", async (msg) => {
       favorites: existingFavs,
       savedAddresses: existingAddrs,
       emergencyContact: existingEmerg,
-      prefs: state.data.prefs?.notes ? state.data.prefs : (existingPrefs || undefined),
+      prefs: state.data.prefs,
     };
     passengers[chatId] = passenger;
     lastOrders[chatId] = { route: state.data.route, seats: state.data.seats, name: state.data.name, phone: state.data.phone };
@@ -2201,6 +1866,7 @@ bot.on("message", async (msg) => {
     orders[orderId] = order;
     userStates[chatId] = { step: "main", data: {} };
 
+    // PRO: wait time estimate + surge notice
     const waitMin = getWaitTimeEstimate(state.data.route);
     const surge = isSurgeActive(state.data.route);
     let confirmMsg = location
@@ -2250,18 +1916,7 @@ bot.on("message", async (msg) => {
     return;
   }
   if (state.step === "parcel_phone") {
-    const phone = normalizeStoredPhone(contact ? contact.phone_number : text);
-    if (!validatePhone(phone)) {
-      await bot.sendMessage(chatId, "❌ To'g'ri telefon kiriting: 998901234567", sharePhoneKeyboard(chatId));
-      return;
-    }
-    state.data.phone = phone;
-    // Save profile
-    if (!passengers[chatId]) passengers[chatId] = { chatId, name: state.data.name, phone, route: "", seats: 0, departureTime: "", favorites: [], savedAddresses: [] };
-    else {
-      passengers[chatId].name = state.data.name;
-      passengers[chatId].phone = phone;
-    }
+    state.data.phone = contact ? contact.phone_number : text;
     state.step = "parcel_route";
     await bot.sendMessage(chatId, t(chatId, "parcelRoute"), routeKeyboard(chatId));
     return;
@@ -2326,13 +1981,13 @@ bot.on("message", async (msg) => {
 });
 
 // ═══════════════════════════════════════════════════════════════
-// CALLBACK QUERIES (FIXED - NO DUPLICATE ANSWERS)
+// CALLBACK QUERIES
 // ═══════════════════════════════════════════════════════════════
 bot.on("callback_query", async (query) => {
   const chatId = query.message?.chat.id!;
   const data = query.data || "";
   const messageId = query.message?.message_id!;
-  markDirty();
+  await bot.answerCallbackQuery({ callback_query_id: query.id });
 
   // Language selection
   if (data === "lang_uz" || data === "lang_ru") {
@@ -2352,7 +2007,7 @@ bot.on("callback_query", async (query) => {
     const orderId = data.replace("accept_", "");
     const order = orders[orderId];
     if (!order || order.status !== "pending") {
-      await answerCb(query.id, { text: "Bu buyurtma allaqachon qabul qilingan!", show_alert: true });
+      await bot.answerCallbackQuery({ callback_query_id: query.id, text: "Bu buyurtma allaqachon qabul qilingan!", show_alert: true });
       await bot.editMessageText(`❌ Allaqachon qabul qilingan: ${order?.passenger?.name || ""}`, { chat_id: chatId, message_id: messageId });
       return;
     }
@@ -2363,6 +2018,7 @@ bot.on("callback_query", async (query) => {
     activeChats[chatId] = order.passenger.chatId;
     activeChats[order.passenger.chatId] = chatId;
 
+    // PRO: track earnings and analytics
     initDriverDefaults(chatId);
     driver.dailyOrders++;
     driver.lastOrderDate = getTodayStr();
@@ -2459,7 +2115,7 @@ bot.on("callback_query", async (query) => {
       `🚗 <b>Haydovchingiz sizning oldingizga yetib keldi!</b>\n\nChiqishga tayyor bo'ling 😊`,
       { parse_mode: "HTML" }
     );
-    await answerCb(query.id, { text: "✅ Yo'lovchiga xabar yuborildi!", show_alert: false });
+    await bot.answerCallbackQuery({ callback_query_id: query.id, text: "✅ Yo'lovchiga xabar yuborildi!", show_alert: false });
     return;
   }
 
@@ -2468,7 +2124,7 @@ bot.on("callback_query", async (query) => {
     const orderId = data.replace("complete_driver_", "");
     const order = orders[orderId];
     if (!order || order.status === "completed") {
-      await answerCb(query.id, { text: "Safar allaqachon yakunlangan.", show_alert: true });
+      await bot.answerCallbackQuery({ callback_query_id: query.id, text: "Safar allaqachon yakunlangan.", show_alert: true });
       return;
     }
     order.status = "completed";
@@ -2487,7 +2143,7 @@ bot.on("callback_query", async (query) => {
     const orderId = data.replace("complete_pass_", "");
     const order = orders[orderId];
     if (!order || order.status === "completed") {
-      await answerCb(query.id, { text: "Safar allaqachon yakunlangan.", show_alert: true });
+      await bot.answerCallbackQuery({ callback_query_id: query.id, text: "Safar allaqachon yakunlangan.", show_alert: true });
       return;
     }
     order.status = "completed";
@@ -2508,7 +2164,7 @@ bot.on("callback_query", async (query) => {
     const order = orders[orderId];
     if (!order) return;
     if (order.status === "completed") {
-      await answerCb(query.id, { text: "Safar allaqachon yakunlangan.", show_alert: true });
+      await bot.answerCallbackQuery({ callback_query_id: query.id, text: "Safar allaqachon yakunlangan.", show_alert: true });
       return;
     }
     order.status = "completed";
@@ -2541,6 +2197,7 @@ bot.on("callback_query", async (query) => {
         rating: stars,
         price: driver.price,
       });
+      // PRO: category ratings (distribute evenly for simplicity)
       initDriverDefaults(driver.chatId);
       driver.analytics.categoryRatings.punctuality.push(stars);
       driver.analytics.categoryRatings.cleanliness.push(stars);
@@ -2563,7 +2220,7 @@ bot.on("callback_query", async (query) => {
     return;
   }
 
-  // Share trip
+  // PRO: Share trip
   if (data.startsWith("share_trip_")) {
     const orderId = data.replace("share_trip_", "");
     const order = orders[orderId];
@@ -2601,12 +2258,7 @@ bot.on("callback_query", async (query) => {
     return;
   }
 
-  if (data === "break_cancel") {
-    await bot.sendMessage(chatId, t(chatId, "cancelled"), mainMenuKeyboard(chatId));
-    return;
-  }
-
-  // Break duration
+  // PRO: Break duration
   if (data.startsWith("break_")) {
     const mins = parseInt(data.replace("break_", ""));
     const driver = drivers[chatId];
@@ -2625,19 +2277,7 @@ bot.on("callback_query", async (query) => {
     return;
   }
 
-  // Break stop
-  if (data === "break_stop") {
-    const driver = drivers[chatId];
-    if (driver?.breakUntil) {
-      driver.breakUntil = undefined;
-      driver.online = true;
-      markDirty();
-      await bot.sendMessage(chatId, t(chatId, "breakDone"), mainMenuKeyboard(chatId));
-    }
-    return;
-  }
-
-  // Earnings callbacks
+  // PRO: Earnings callbacks
   if (data.startsWith("earn_")) {
     const driver = drivers[chatId];
     if (!driver) return;
@@ -2669,37 +2309,17 @@ bot.on("callback_query", async (query) => {
     return;
   }
 
-  // Favorite order
+  // PRO: Favorite order
   if (data.startsWith("fav_order_")) {
     const dId = parseInt(data.replace("fav_order_", ""));
     const driver = drivers[dId];
     if (!driver || !driver.online) {
-      await answerCb(query.id, { text: "Haydovchi hozir offline.", show_alert: true });
-      return;
-    }
-    const savedProfile = getSavedPassengerProfile(chatId);
-    if (savedProfile) {
-      userStates[chatId] = { step: "ann_order_seats", data: { targetDriverId: dId, route: driver.route, ...savedProfile } };
-      await answerCb(query.id);
-      await bot.sendMessage(chatId, `🚕 <b>${driver.name}</b> ga buyurtma:\n📍 ${driver.route}\n🕐 ${driver.departureTime}\n💰 ${driver.price.toLocaleString()} so'm\n\n✅ Сохранённые данные загружены.\n${t(chatId, "enterSeatsP")}`,
-        { parse_mode: "HTML", ...cancelKeyboard(chatId) });
+      await bot.answerCallbackQuery({ callback_query_id: query.id, text: "Haydovchi hozir offline.", show_alert: true });
       return;
     }
     userStates[chatId] = { step: "ann_order_name", data: { targetDriverId: dId, route: driver.route } };
-    await answerCb(query.id);
     await bot.sendMessage(chatId, `🚕 <b>${driver.name}</b> ga buyurtma:\n📍 ${driver.route}\n🕐 ${driver.departureTime}\n💰 ${driver.price.toLocaleString()} so'm\n\nIsmingizni kiriting:`,
       { parse_mode: "HTML", ...cancelKeyboard(chatId) });
-    return;
-  }
-
-  // Favorite delete
-  if (data.startsWith("fav_del_")) {
-    const dId = parseInt(data.replace("fav_del_", ""));
-    if (passengers[chatId]?.favorites) {
-      passengers[chatId].favorites = passengers[chatId].favorites.filter((id) => id !== dId);
-      await answerCb(query.id, { text: "Sevimlilardan o'chirildi!", show_alert: false });
-      await bot.sendMessage(chatId, "✅ Haydovchi sevimlilardan o'chirildi.", mainMenuKeyboard(chatId));
-    }
     return;
   }
 
@@ -2735,24 +2355,6 @@ bot.on("callback_query", async (query) => {
       txt += `   Holat: ${o.status === "pending" ? "⏳ Kutilmoqda" : o.status === "accepted" ? "✅ Qabul" : "❌ Bekor"}\n\n`;
     });
     await bot.sendMessage(chatId, txt, { parse_mode: "HTML" });
-    return;
-  }
-
-  if (data === "admin_users" && isAdmin(chatId)) {
-    const ids = [...new Set([...allUsers, ...Object.keys(drivers).map(Number), ...Object.keys(passengers).map(Number)])].sort((a, b) => b - a);
-    if (ids.length === 0) {
-      await bot.sendMessage(chatId, "Foydalanuvchilar yo'q.");
-      return;
-    }
-    const lines = ids.map((uid, index) => {
-      const driver = drivers[uid];
-      const passenger = passengers[uid];
-      const role = driver ? "🚗 Haydovchi" : passenger ? "🧑 Yo'lovchi" : "👤 Foydalanuvchi";
-      const name = driver?.name || passenger?.name || `ID:${uid}`;
-      const phone = driver?.phone || passenger?.phone || "—";
-      return `${index + 1}. ${role} — <b>${name}</b> | 📞 ${phone} | 🆔 <code>${uid}</code>`;
-    });
-    await sendChunkedHtml(chatId, `👥 <b>Foydalanuvchilar ro'yxati</b> (${ids.length})`, lines);
     return;
   }
 
@@ -2792,7 +2394,6 @@ bot.on("callback_query", async (query) => {
     const dId = parseInt(data.replace("approve_", ""));
     if (drivers[dId]) {
       drivers[dId].approved = true;
-      markDirty();
       await bot.editMessageText(`✅ Tasdiqlandi: ${drivers[dId].name}`, { chat_id: chatId, message_id: messageId });
       await bot.sendMessage(dId, t(dId, "approved"));
     }
@@ -2803,7 +2404,6 @@ bot.on("callback_query", async (query) => {
     const dId = parseInt(data.replace("block_", ""));
     if (drivers[dId]) {
       drivers[dId].blocked = true;
-      markDirty();
       await bot.editMessageText(`🚫 Bloklandi: ${drivers[dId].name}`, { chat_id: chatId, message_id: messageId });
       await bot.sendMessage(dId, t(dId, "blocked"));
     }
@@ -2814,7 +2414,6 @@ bot.on("callback_query", async (query) => {
     const dId = parseInt(data.replace("unblock_", ""));
     if (drivers[dId]) {
       drivers[dId].blocked = false;
-      markDirty();
       await bot.editMessageText(`🔓 Blokdan chiqarildi: ${drivers[dId].name}`, { chat_id: chatId, message_id: messageId });
       await bot.sendMessage(dId, t(dId, "unblocked"));
     }
@@ -2906,8 +2505,8 @@ bot.on("callback_query", async (query) => {
   if (data.startsWith("ann_phone_")) {
     const dId = parseInt(data.replace("ann_phone_", ""));
     const driver = drivers[dId];
-    if (!driver) { await answerCb(query.id, { text: "Haydovchi topilmadi.", show_alert: true }); return; }
-    await answerCb(query.id, { text: `📞 ${driver.name}: ${driver.phone}`, show_alert: true });
+    if (!driver) { await bot.answerCallbackQuery({ callback_query_id: query.id, text: "Haydovchi topilmadi.", show_alert: true }); return; }
+    await bot.answerCallbackQuery({ callback_query_id: query.id, text: `📞 ${driver.name}: ${driver.phone}`, show_alert: true });
     return;
   }
 
@@ -2915,32 +2514,24 @@ bot.on("callback_query", async (query) => {
     const dId = parseInt(data.replace("ann_order_", ""));
     const driver = drivers[dId];
     if (!driver || !driver.online) {
-      await answerCb(query.id, { text: "Haydovchi hozir offline.", show_alert: true });
-      return;
-    }
-    const savedProfile = getSavedPassengerProfile(chatId);
-    if (savedProfile) {
-      userStates[chatId] = { step: "ann_order_seats", data: { targetDriverId: dId, route: driver.route, ...savedProfile } };
-      await answerCb(query.id);
-      await bot.sendMessage(chatId, `🚕 <b>${driver.name}</b> ga buyurtma:\n📍 ${driver.route}\n🕐 ${driver.departureTime}\n💰 ${driver.price.toLocaleString()} so'm\n\n✅ Сохранённые данные загружены.\n${t(chatId, "enterSeatsP")}`,
-        { parse_mode: "HTML", ...cancelKeyboard(chatId) });
+      await bot.answerCallbackQuery({ callback_query_id: query.id, text: "Haydovchi hozir offline.", show_alert: true });
       return;
     }
     userStates[chatId] = { step: "ann_order_name", data: { targetDriverId: dId, route: driver.route } };
-    await answerCb(query.id);
+    await bot.answerCallbackQuery({ callback_query_id: query.id });
     await bot.sendMessage(chatId, `🚕 <b>${driver.name}</b> ga buyurtma:\n📍 ${driver.route}\n🕐 ${driver.departureTime}\n💰 ${driver.price.toLocaleString()} so'm\n\nIsmingizni kiriting:`,
       { parse_mode: "HTML", ...cancelKeyboard(chatId) });
     return;
   }
 
-  // Add favorite
+  // PRO: Add favorite
   if (data.startsWith("fav_add_")) {
     const dId = parseInt(data.replace("fav_add_", ""));
     if (!passengers[chatId]) passengers[chatId] = { chatId, name: "", phone: "", route: "", seats: 0, departureTime: "", favorites: [], savedAddresses: [] };
     if (!passengers[chatId].favorites.includes(dId)) {
       passengers[chatId].favorites.push(dId);
     }
-    await answerCb(query.id, { text: "⭐ Sevimlilarga qo'shildi!", show_alert: false });
+    await bot.answerCallbackQuery({ callback_query_id: query.id, text: "⭐ Sevimlilarga qo'shildi!", show_alert: false });
     return;
   }
 
@@ -2949,11 +2540,11 @@ bot.on("callback_query", async (query) => {
     const orderId = data.replace("cancel_order_", "");
     const order = orders[orderId];
     if (!order || order.passenger.chatId !== chatId) {
-      await answerCb(query.id, { text: "Buyurtma topilmadi.", show_alert: true });
+      await bot.answerCallbackQuery({ callback_query_id: query.id, text: "Buyurtma topilmadi.", show_alert: true });
       return;
     }
     if (order.status !== "pending") {
-      await answerCb(query.id, { text: "Bu buyurtma allaqachon qabul qilingan, bekor qilib bo'lmaydi.", show_alert: true });
+      await bot.answerCallbackQuery({ callback_query_id: query.id, text: "Bu buyurtma allaqachon qabul qilingan, bekor qilib bo'lmaydi.", show_alert: true });
       return;
     }
     order.status = "rejected";
@@ -2961,7 +2552,7 @@ bot.on("callback_query", async (query) => {
       `❌ <b>Buyurtma bekor qilindi</b>\n\n📍 ${order.passenger.route}\n🕐 ${order.passenger.departureTime}`,
       { chat_id: chatId, message_id: messageId, parse_mode: "HTML" }
     );
-    await answerCb(query.id, { text: "✅ Buyurtma bekor qilindi.", show_alert: false });
+    await bot.answerCallbackQuery({ callback_query_id: query.id, text: "✅ Buyurtma bekor qilindi.", show_alert: false });
     return;
   }
 
@@ -3092,7 +2683,6 @@ bot.on("callback_query", async (query) => {
     const targetId = parseInt(parts[0]);
     const targetName = parts.slice(1).join("_");
     const targetPhone = passengers[targetId]?.phone || drivers[targetId]?.phone || "Noma'lum";
-    markDirty();
     blacklist[targetId] = {
       chatId: targetId,
       name: targetName,
@@ -3110,14 +2700,15 @@ bot.on("callback_query", async (query) => {
     const entry = blacklist[targetId];
     if (entry) {
       delete blacklist[targetId];
-      markDirty();
       await bot.editMessageText(`🔓 ${entry.name} blacklistdan chiqarildi.`, { chat_id: chatId, message_id: messageId });
       try { await bot.sendMessage(targetId, "✅ Siz tizimga qaytadingiz. /start bosing."); } catch (_) {}
     }
     return;
   }
 
+  // ═════════════════════════════════════════════════════════════
   // PRO ADMIN CALLBACKS
+  // ═════════════════════════════════════════════════════════════
 
   // Route analytics
   if (data === "admin_route_analytics" && isAdmin(chatId)) {
@@ -3176,47 +2767,6 @@ bot.on("callback_query", async (query) => {
   if (data === "admin_cleanup" && isAdmin(chatId)) {
     const cleaned = cleanupOldOrders();
     await bot.sendMessage(chatId, t(chatId, "cleanupDone", { count: String(cleaned) }), { parse_mode: "HTML" });
-    return;
-  }
-
-  // Scheduled broadcast
-  if (data === "admin_scheduled_broadcast" && isAdmin(chatId)) {
-    userStates[chatId] = { step: "admin_sched_msg", data: {} };
-    await bot.sendMessage(chatId, "📅 Xabar matnini kiriting:", cancelKeyboard(chatId));
-    return;
-  }
-
-  // Add place
-  if (data === "add_place") {
-    userStates[chatId] = { step: "place_name", data: {} };
-    await bot.sendMessage(chatId, "Manzil nomini kiriting (masalan: Uy, Ish):", cancelKeyboard(chatId));
-    return;
-  }
-
-  // Delete place
-  if (data.startsWith("del_place_")) {
-    const idx = parseInt(data.replace("del_place_", ""));
-    if (passengers[chatId]?.savedAddresses && passengers[chatId].savedAddresses[idx]) {
-      const name = passengers[chatId].savedAddresses[idx].name;
-      passengers[chatId].savedAddresses.splice(idx, 1);
-      await answerCb(query.id, { text: `${name} o'chirildi!`, show_alert: false });
-      await bot.sendMessage(chatId, "✅ Manzil o'chirildi.", mainMenuKeyboard(chatId));
-    }
-    return;
-  }
-
-  // Quick messages
-  if (data.startsWith("quickmsg_")) {
-    const msg = data.replace("quickmsg_", "");
-    const activeOrder = Object.values(orders).find(
-      (o) => o.passenger.chatId === chatId && o.status === "accepted"
-    );
-    if (activeOrder?.driverId) {
-      await bot.sendMessage(activeOrder.driverId, `💬 <b>Tez xabar yo'lovchidan:</b>\n<i>${msg}</i>`, { parse_mode: "HTML" });
-      await answerCb(query.id, { text: "Yuborildi!", show_alert: false });
-    } else {
-      await answerCb(query.id, { text: "Faol buyurtma yo'q!", show_alert: true });
-    }
     return;
   }
 });
