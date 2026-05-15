@@ -1,5 +1,5 @@
 import app from "./app";
-import "./bot";
+import "./bot/index";
 import { logger } from "./lib/logger";
 
 // Health check endpoint for Railway
