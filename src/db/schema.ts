@@ -1,4 +1,4 @@
-import { pgTable, text, integer, boolean, timestamp, bigint, uuid, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, text, integer, boolean, timestamp, bigint, uuid, jsonb, serial } from "drizzle-orm/pg-core";
 
 export const users = pgTable("users", {
   id: serial("id").primaryKey(),
@@ -80,4 +80,3 @@ export const referrals = pgTable("referrals", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
-import { serial } from "drizzle-orm/pg-core";
